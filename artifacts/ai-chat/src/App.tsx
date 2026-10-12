@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { getStreamChatReplyUrl, type ChatMessage } from '@workspace/api-client-react';
-import { ArrowUp, Check, Copy, Plus, RotateCcw, Sparkles, Square } from 'lucide-react';
+import {
+  getGetConversationUrl,
+  getListConversationsUrl,
+  getStreamChatReplyUrl,
+  type ChatConversation,
+  type ChatMessage,
+  type ConversationSummary,
+} from '@workspace/api-client-react';
+import { ArrowUp, Check, Copy, History, Plus, RotateCcw, Sparkles, Square } from 'lucide-react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -21,29 +28,107 @@ const prompts = [
   { label: 'Learn a quick fact', prompt: 'How do airplanes stay in the air?' },
 ];
 
+async function responseError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = await response.json();
+    if (typeof body.error === 'string') return body.error;
+  } catch {
+    // Keep the fallback when the response is not JSON.
+  }
+  return fallback;
+}
+
+async function fetchConversations(signal?: AbortSignal): Promise<ConversationSummary[]> {
+  const response = await fetch(getListConversationsUrl(), {
+    credentials: 'include',
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await responseError(response, 'Could not load saved conversations.'));
+  }
+  return response.json() as Promise<ConversationSummary[]>;
+}
+
+async function fetchConversation(id: string, signal?: AbortSignal): Promise<ChatConversation> {
+  const response = await fetch(getGetConversationUrl(id), {
+    credentials: 'include',
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await responseError(response, 'Could not open this conversation.'));
+  }
+  return response.json() as Promise<ChatConversation>;
+}
+
 function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState('');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [savedConversations, setSavedConversations] = useState<ConversationSummary[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+
+    async function restoreLatestConversation() {
+      try {
+        const conversations = await fetchConversations(controller.signal);
+        if (!active) return;
+        setSavedConversations(conversations);
+        if (conversations[0]) {
+          const latest = await fetchConversation(conversations[0].id, controller.signal);
+          if (!active) return;
+          setConversationId(latest.id);
+          setMessages(latest.messages);
+        }
+      } catch (err) {
+        if (active && !controller.signal.aborted) {
+          setHistoryError(err instanceof Error ? err.message : 'Could not load saved chats.');
+        }
+      } finally {
+        if (active) setHistoryLoading(false);
+      }
+    }
+
+    void restoreLatestConversation();
+    return () => {
+      active = false;
+      controller.abort();
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, streaming, error]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  async function refreshSavedConversations() {
+    try {
+      setSavedConversations(await fetchConversations());
+      setHistoryError('');
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : 'Could not load saved chats.');
+    }
+  }
 
   async function sendMessage(text = draft, history: ChatMessage[] = messages) {
     const content = text.trim();
-    if (!content || streaming) return;
+    if (!content || streaming || historyLoading) return;
     setDraft('');
     setError('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     const nextMessages: ChatMessage[] = [...history, { role: 'user', content }];
+    const activeConversationId = conversationId ?? crypto.randomUUID();
+    setConversationId(activeConversationId);
     setMessages([...nextMessages, { role: 'assistant', content: '' }]);
     setStreaming(true);
     const controller = new AbortController();
@@ -54,16 +139,11 @@ function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
         credentials: 'include',
-        body: JSON.stringify({ messages: nextMessages.slice(-40) }),
+        body: JSON.stringify({ conversationId: activeConversationId, message: content }),
         signal: controller.signal,
       });
       if (!response.ok) {
-        let detail = `The reply could not be loaded (${response.status}).`;
-        try {
-          const body = await response.json();
-          if (typeof body.error === 'string') detail = body.error;
-        } catch { /* Keep the useful status message when the response is not JSON. */ }
-        throw new Error(detail);
+        throw new Error(await responseError(response, `The reply could not be loaded (${response.status}).`));
       }
       if (!response.body) throw new Error('This connection cannot stream a reply. Please try again.');
 
@@ -74,8 +154,9 @@ function Home() {
       const handleEvent = (block: string) => {
         const data = block.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n');
         if (!data) return;
-        let event: { content?: string; done?: true; error?: string };
+        let event: { content?: string; done?: true; error?: string; conversationId?: string };
         try { event = JSON.parse(data); } catch { return; }
+        if (event.conversationId) setConversationId(event.conversationId);
         if (event.content) {
           setMessages((current) => {
             const updated = [...current];
@@ -98,6 +179,7 @@ function Home() {
       }
       if (buffer.trim()) handleEvent(buffer);
       if (!finished && !controller.signal.aborted) throw new Error('The connection ended before the answer was complete.');
+      if (finished) void refreshSavedConversations();
     } catch (err) {
       if (controller.signal.aborted) return;
       setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
@@ -141,9 +223,28 @@ function Home() {
   function startFresh() {
     if (streaming) stopReply();
     setMessages([]);
+    setConversationId(null);
     setError('');
     setDraft('');
+    setHistoryOpen(false);
     requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
+  async function openSavedConversation(id: string) {
+    if (streaming) return;
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      const conversation = await fetchConversation(id);
+      setConversationId(conversation.id);
+      setMessages(conversation.messages);
+      setError('');
+      setHistoryOpen(false);
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : 'Could not open this conversation.');
+    } finally {
+      setHistoryLoading(false);
+    }
   }
 
   return (
@@ -159,6 +260,17 @@ function Home() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((open) => !open)}
+            aria-expanded={historyOpen}
+            aria-controls="chat-history"
+            data-testid="button-chat-history"
+            className="group flex h-9 items-center gap-2 rounded-full border border-border/80 px-3.5 text-[12px] font-medium text-muted-foreground transition hover:border-primary/40 hover:text-foreground"
+          >
+            <History size={14} />
+            <span className="hidden sm:inline">History</span>
+          </button>
           {messages.length > 0 && (
             <button onClick={startFresh} data-testid="button-new-chat" className="group flex h-9 items-center gap-2 rounded-full border border-border/80 px-3.5 text-[12px] font-medium text-muted-foreground transition hover:border-primary/40 hover:text-foreground">
               <Plus size={14} className="transition-transform group-hover:rotate-90" />
@@ -170,6 +282,56 @@ function Home() {
             Here for the curious
           </div>
         </div>
+        {historyOpen && (
+          <div
+            id="chat-history"
+            role="region"
+            aria-label="Saved conversations"
+            className="absolute right-4 top-[64px] z-50 w-[min(92vw,360px)] overflow-hidden rounded-2xl border border-border bg-card shadow-[0_16px_50px_hsl(183_31%_16%/.16)] sm:right-9"
+          >
+            <div className="flex items-center justify-between border-b border-border/70 px-4 py-3">
+              <div>
+                <div className="text-[13px] font-semibold">Saved chats</div>
+                <div className="mt-0.5 text-[10px] text-muted-foreground">Only available in this browser</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHistoryOpen(false)}
+                aria-label="Close saved chats"
+                className="rounded-full px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
+              >
+                Close
+              </button>
+            </div>
+            {historyError && (
+              <p className="border-b border-border/70 px-4 py-3 text-[12px] leading-relaxed text-destructive" role="alert">
+                {historyError}
+              </p>
+            )}
+            <div className="max-h-[min(55vh,420px)] overflow-y-auto p-2">
+              {historyLoading ? (
+                <p className="px-3 py-4 text-[12px] text-muted-foreground">Loading saved chats…</p>
+              ) : savedConversations.length === 0 ? (
+                <p className="px-3 py-4 text-[12px] text-muted-foreground">Your saved conversations will appear here.</p>
+              ) : (
+                savedConversations.map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    type="button"
+                    disabled={streaming}
+                    onClick={() => void openSavedConversation(conversation.id)}
+                    className={`flex w-full flex-col items-start gap-1 rounded-xl px-3 py-2.5 text-left transition hover:bg-primary/5 disabled:opacity-50 ${conversation.id === conversationId ? 'bg-primary/5' : ''}`}
+                  >
+                    <span className="w-full truncate text-[12px] font-medium text-foreground">{conversation.title}</span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {new Date(conversation.updatedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
       </header>
 
       <section className="relative flex min-h-0 flex-1 flex-col">
@@ -288,7 +450,9 @@ function Home() {
                 className="block max-h-40 min-h-[49px] w-full resize-none bg-transparent px-3.5 pt-[14px] text-[14px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/75 disabled:opacity-60 sm:px-4"
               />
               <div className="flex items-center justify-between px-1 pb-0.5 pl-3">
-                <span className="text-[10px] text-muted-foreground/75">Clear answers, no account needed</span>
+                 <span className="text-[10px] text-muted-foreground/75">
+                   {historyLoading ? 'Loading saved chats…' : historyError ? 'Saved history unavailable' : 'Saved in this browser only'}
+                 </span>
                 <div className="flex items-center gap-3">
                   <span className="hidden font-mono text-[9px] text-muted-foreground/60 sm:inline">SHIFT + ENTER for a new line</span>
                   {streaming ? (

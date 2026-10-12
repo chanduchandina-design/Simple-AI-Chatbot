@@ -18,20 +18,51 @@ export const HealthCheckResponse = zod.object({
 
 
 /**
+ * @summary List this browser's saved conversations
+ */
+export const ListConversationsResponseItem = zod.object({
+  "id": zod.string().uuid(),
+  "title": zod.string(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+export const ListConversationsResponse = zod.array(ListConversationsResponseItem)
+
+
+/**
+ * @summary Load one saved conversation for this browser
+ */
+export const GetConversationParams = zod.object({
+  "id": zod.coerce.string().uuid()
+})
+
+export const getConversationResponseMessagesItemContentMax = 8000;
+
+
+
+export const GetConversationResponse = zod.object({
+  "id": zod.string().uuid(),
+  "title": zod.string(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date(),
+  "messages": zod.array(zod.object({
+  "role": zod.enum(['user', 'assistant']),
+  "content": zod.string().min(1).max(getConversationResponseMessagesItemContentMax)
+}))
+})
+
+
+/**
  * Streams a Gemini assistant response as server-sent events.
  * @summary Stream a Gemini chat reply
  */
-export const streamChatReplyBodyMessagesItemContentMax = 8000;
-
-export const streamChatReplyBodyMessagesMax = 40;
+export const streamChatReplyBodyMessageMax = 8000;
 
 
 
 export const StreamChatReplyBody = zod.object({
-  "messages": zod.array(zod.object({
-  "role": zod.enum(['user', 'assistant']),
-  "content": zod.string().min(1).max(streamChatReplyBodyMessagesItemContentMax)
-})).min(1).max(streamChatReplyBodyMessagesMax)
+  "conversationId": zod.string().uuid(),
+  "message": zod.string().min(1).max(streamChatReplyBodyMessageMax)
 })
 
 export const StreamChatReplyResponse = zod.unknown()

@@ -27,10 +27,26 @@ export interface ChatMessage {
 }
 
 export interface ChatInput {
+  conversationId: string;
   /**
-     * @minItems 1
-     * @maxItems 40
+     * @minLength 1
+     * @maxLength 8000
      */
+  message: string;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatConversation {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
   messages: ChatMessage[];
 }
 

@@ -1,6 +1,8 @@
 import { Router, type IRouter } from "express";
 import rateLimit from "express-rate-limit";
 import { StreamChatReplyBody } from "@workspace/api-zod";
+import { getBrowserId } from "../lib/browser-session";
+import { supabase } from "../lib/supabase";
 
 const router: IRouter = Router();
 const geminiUrl =
@@ -13,6 +15,8 @@ type GeminiStreamChunk = {
     };
   }>;
 };
+
+type StoredMessage = { role: "user" | "assistant"; content: string };
 
 const chatRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -39,6 +43,41 @@ router.post("/gemini/chat", chatRateLimit, async (req, res): Promise<void> => {
     return;
   }
 
+  const browserId = getBrowserId(req, res);
+  const conversationId = parsed.data.conversationId;
+  const { data: existingConversation, error: loadError } = await supabase
+    .from("chat_conversations")
+    .select("id,owner_id,title,messages,created_at")
+    .eq("id", conversationId)
+    .maybeSingle();
+
+  if (loadError) {
+    req.log.error({ code: loadError.code }, "Failed to load conversation before reply");
+    res.status(503).json({
+      error:
+        loadError.code === "PGRST205" || loadError.code === "42P01"
+          ? "Supabase is connected, but its chat table is missing. Run artifacts/ai-chat/supabase/schema.sql in the Supabase SQL Editor."
+          : "Supabase chat storage is unavailable. Check the Supabase setup and try again.",
+    });
+    return;
+  }
+  if (existingConversation && existingConversation.owner_id !== browserId) {
+    res.status(404).json({ error: "Conversation not found." });
+    return;
+  }
+
+  const storedMessages = (existingConversation?.messages ?? []) as StoredMessage[];
+  const lastStoredMessage = storedMessages.at(-1);
+  const userMessage: StoredMessage = {
+    role: "user",
+    content: parsed.data.message,
+  };
+  const conversationMessages =
+    lastStoredMessage?.role === "user" &&
+    lastStoredMessage.content === userMessage.content
+      ? storedMessages
+      : [...storedMessages, userMessage];
+
   const abortController = new AbortController();
   res.on("close", () => {
     if (!res.writableEnded) abortController.abort();
@@ -60,7 +99,7 @@ router.post("/gemini/chat", chatRateLimit, async (req, res): Promise<void> => {
             },
           ],
         },
-        contents: parsed.data.messages.map((message) => ({
+        contents: conversationMessages.slice(-40).map((message) => ({
           role: message.role === "assistant" ? "model" : "user",
           parts: [{ text: message.content }],
         })),
@@ -98,8 +137,10 @@ router.post("/gemini/chat", chatRateLimit, async (req, res): Promise<void> => {
       "X-Accel-Buffering": "no",
     });
     res.flushHeaders();
+    res.write(`data: ${JSON.stringify({ conversationId })}\n\n`);
 
     let hasText = false;
+    let fullReply = "";
     let buffer = "";
     const decoder = new TextDecoder();
     const processLine = (line: string): void => {
@@ -112,6 +153,7 @@ router.post("/gemini/chat", chatRateLimit, async (req, res): Promise<void> => {
         for (const part of candidate.content?.parts ?? []) {
           if (typeof part.text !== "string" || !part.text || part.thought) continue;
           hasText = true;
+          fullReply += part.text;
           res.write(`data: ${JSON.stringify({ content: part.text })}\n\n`);
         }
       }
@@ -129,14 +171,58 @@ router.post("/gemini/chat", chatRateLimit, async (req, res): Promise<void> => {
     buffer += decoder.decode();
     if (buffer.trim()) processLine(buffer);
 
-    if (!res.destroyed && !res.writableEnded) {
+    if (!hasText) {
       res.write(
-        `data: ${JSON.stringify(
-          hasText
-            ? { done: true }
-            : { error: "Google Gemini returned an empty reply. Please try again." },
-        )}\n\n`,
+        `data: ${JSON.stringify({ error: "Google Gemini returned an empty reply. Please try again." })}\n\n`,
       );
+      res.end();
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const updatedMessages: StoredMessage[] = [
+      ...conversationMessages,
+      { role: "assistant", content: fullReply },
+    ];
+    const title =
+      existingConversation?.title ??
+      parsed.data.message.trim().split(/\r?\n/, 1)[0].slice(0, 80);
+    const saveResult = existingConversation
+      ? await supabase
+          .from("chat_conversations")
+          .update({
+            title,
+            messages: updatedMessages,
+            updated_at: now,
+          })
+          .eq("id", conversationId)
+          .eq("owner_id", browserId)
+      : await supabase.from("chat_conversations").insert({
+          id: conversationId,
+          owner_id: browserId,
+          title,
+          messages: updatedMessages,
+          created_at: now,
+          updated_at: now,
+        });
+
+    if (saveResult.error) {
+      req.log.error(
+        { code: saveResult.error.code },
+        "Failed to save completed conversation",
+      );
+      res.write(
+        `data: ${JSON.stringify({
+          error:
+            "Your reply was generated, but it could not be saved. Check the Supabase setup and try again.",
+        })}\n\n`,
+      );
+      res.end();
+      return;
+    }
+
+    if (!res.destroyed && !res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ done: true, conversationId })}\n\n`);
       res.end();
     }
   } catch (error) {

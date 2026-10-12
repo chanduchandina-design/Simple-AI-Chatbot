@@ -5,12 +5,12 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-import type { ChatMessage } from './chatMessage';
 
 export interface ChatInput {
+  conversationId: string;
   /**
-     * @minItems 1
-     * @maxItems 40
+     * @minLength 1
+     * @maxLength 8000
      */
-  messages: ChatMessage[];
+  message: string;
 }
