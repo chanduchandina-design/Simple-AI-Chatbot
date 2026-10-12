@@ -26,12 +26,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
-  /openai/chat:
+  /gemini/chat:
     post:
       operationId: streamChatReply
       tags: [chat]
-      summary: Stream an AI chat reply
-      description: Streams an assistant response as server-sent events.
+      summary: Stream a Gemini chat reply
+      description: Streams a Gemini assistant response as server-sent events.
       requestBody:
         required: true
         content:

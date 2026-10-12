@@ -18,8 +18,8 @@ export const HealthCheckResponse = zod.object({
 
 
 /**
- * Streams an assistant response as server-sent events.
- * @summary Stream an AI chat reply
+ * Streams a Gemini assistant response as server-sent events.
+ * @summary Stream a Gemini chat reply
  */
 export const streamChatReplyBodyMessagesItemContentMax = 8000;
 

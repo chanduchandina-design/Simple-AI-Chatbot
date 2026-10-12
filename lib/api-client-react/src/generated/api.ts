@@ -135,12 +135,12 @@ export const getStreamChatReplyUrl = () => {
 
 
 
-  return `/api/openai/chat`
+  return `/api/gemini/chat`
 }
 
 /**
- * Streams an assistant response as server-sent events.
- * @summary Stream an AI chat reply
+ * Streams a Gemini assistant response as server-sent events.
+ * @summary Stream a Gemini chat reply
  */
 export const streamChatReply = async (chatInput: ChatInput, options?: Parameters<typeof customFetch>[1]): Promise<string> => {
 
@@ -206,7 +206,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type StreamChatReplyMutationVariables = {data: BodyType<ChatInput>}
 
     /**
- * @summary Stream an AI chat reply
+ * @summary Stream a Gemini chat reply
  */
 export const useStreamChatReply = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof streamChatReply>>, TError,StreamChatReplyMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
